@@ -128,19 +128,43 @@ def main() -> int:
     print(f"     받은 행 {len(raw):,} / DB 신규 {inserted:,} / 중복 스킵 {skipped:,}")
     print(f"     CSV  {csv_path}")
     print(f"     DB 누적 {total:,}행")
-    # 실행결과 1)
+    # 실행 1) 2시간짜리 구간
     # [OK] window 2024-03-01 07:00:00 ~ 2024-03-01 08:31:10
     #  받은 행 275 / DB 신규 275 / 중복 스킵 0
     #  CSV  C:\Users\swrkd\Desktop\predictive-maintenance\data\history\2024-03-01.csv
     #  DB 누적 275행
-    # 실행결과 2)
+    # 실행 2) 2시간짜리 구간
     # 똑같은 수집 작업을 여러 번 실행했을 때 중복 데이터가 DB에 또 들어가는 지 확인하기 위해 동일 조건으로 재검
     # [OK] window 2024-03-01 07:00:00 ~ 2024-03-01 08:31:10
     #  받은 행 275 / DB 신규 0 / 중복 스킵 275
     #  CSV  C:\Users\swrkd\Desktop\predictive-maintenance\data\history\2024-03-01.csv
     #  DB 누적 275행
     # 중복 방지가 제대로 작동함을 확인하였으므로 검사를 계속 진행하지 않고 멈춤
+
     return 0
+
+    # [14일치 수집 테스트]
+    # collector.py가 여러 날짜의 데이터를 연속으로 수집하고 저장하는지 확인하기 위해
+    # 2024-01-01 ~ 2024-01-14까지 총 14일치 데이터를 수집함
+    # 실행 1) 2024-01-01 하루치를 테스트 용도로 실행
+    # python src/collector.py --minutes 1440 --end "2024-01-02 00:00:00"
+    # [OK] window 2024-01-01 00:00:00 ~ 2024-01-01 23:59:00
+    # 받은 행 3,903 / DB 신규 3,903 / 중복 스킵 0
+    # DB 누적 4,178행
+    # 실행 2) PowerShell의 for문을 사용하여 남은 13일치를 연속 실행
+    # for ($i = 1; $i -le 13; $i++) {
+    #     $d = (Get-Date "2024-01-02").AddDays($i).ToString("yyyy-MM-dd HH:mm:ss")
+    #     python src/collector.py --minutes 1440 --end "$d"
+    # }
+    # 2024-01-02 ~ 2024-01-14까지 날짜별 CSV가 생성되는 것을 확인함
+    # 14일치 데이터 총 55,591행 수집
+    # 기존 테스트 데이터 275행을 포함하여 DB 누적 55,866행
+    # 날짜별 CSV 14개 생성
+    # CSV와 SQLite DB에 누적 저장할 수 있음을 확인
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 # main() 내에 있는 실제 작업들을 시작
