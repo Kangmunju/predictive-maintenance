@@ -50,6 +50,12 @@ def fetch(minutes: int, end: str | None = None) -> pd.DataFrame:
     return sample_window(n_minutes=minutes, end=end)
 
 
+# simulator.py에 작성한 sample_window() 함수로 지정한 시간 구간의 센서 데이터를 생성
+# sample_window()는 시작 시각을 기준으로 seed를 생성함
+# 같은 시간 구간을 다시 수집하면 동일한 센서 데이터가 생성됨
+# 이를 통해 같은 데이터를 반복 수집해도 중복 저장되지 않는 지 확인할 수 있도록 프로그램을 구성
+
+
 # 실제 수집 프로그램
 # 가져온 데이터를 CSV와 DB에 실제 저장
 def main() -> int:
@@ -153,3 +159,6 @@ if __name__ == "__main__":
 # CSV의 drop_duplicates() -> 같은 CSV 안에서 중복 제거
 # DB의 UNIQUE + INSERT OR IGNORE -> DB에 이미 저장된 데이터와 중복인지 검사
 # 여러 단계로 중복을 방어하기 위하여 이렇게 구성함
+
+# 동일한 데이터를 생성하는 역할은 sample_window()의 seed가 맡도록 하였고
+# 그 동일한 데이터가 DB에 또 들어가지 않도록 방지하는 역할은 db.py의 중복 방지 로직으로 구현함

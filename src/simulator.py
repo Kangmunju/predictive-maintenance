@@ -288,7 +288,10 @@ def sample_window(
     """수집기가 호출하는 함수. 최근 n분 구간의 관측 데이터를 돌려줍니다."""
     end = pd.Timestamp.utcnow().floor("min") if end is None else pd.Timestamp(end)
     start = end - pd.Timedelta(minutes=n_minutes)
-    # 시드를 날짜에서 뽑으면 같은 날 다시 돌려도 같은 값이 나옵니다(재현성)
+    # 시드를 날짜에서 뽑으면 같은 날 다시 돌려도 같은 값이 나옴 (재현성)
+    # 시작 시각을 이용해 seed 값을 생성
+    # 같은 수집 구간을 다시 실행하면 같은 seed가 생성되므로 동일한 센서 데이터를 다시 생성 가능
+    # 이를 통해 같은 데이터를 재수집하더라도 DB에 중복 저장되지 않는 지 확인 가능
     if seed is None:
         seed = int(start.strftime("%Y%m%d%H"))
     truth = simulate_truth(n_minutes=n_minutes, start=start, seed=seed)
