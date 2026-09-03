@@ -47,7 +47,71 @@ print(obs["air_temp_k"].describe().round(2).to_string())
 # 50%        298.51
 # 75%        300.20
 # max       5054.47
-# 대부분의 값이 296 ~ 300K 근처에 몰려있는 것을 확인
-# 그런데 min=0.0 max=5054.47d을 보아 이상값이 껴있다는 것 또한 확인
+# 대부분의 값이 296 ~ 300K 근처에 몰려있는 것 확인
+# min=0.0 max=5054.47d을 보아 이상값이 껴있다는 것 확인
+# 평균이 중앙값보다 훨씬 적은 것 확인
 print("200 K 미만 비율 : %.2f%%" % ((obs["air_temp_k"] < 200).mean() * 100))
 # 현재 관측된 air_temp_k 값 중 200K보다 미만인 값의 비율 : 10.71%
+
+inj = pd.DataFrame({"건수": masks.sum(), "비율(%)": (masks.mean() * 100).round(3)})
+print(inj.to_string)
+#                          건수   비율(%)
+# unit_temp             5910  10.654
+# unit_vib              2178   3.926
+# spike_air_temp_k       220   0.397
+# spike_process_temp_k   208   0.375
+# spike_rot_speed_rpm    236   0.425
+# spike_torque_nm        219   0.395
+# spike_tool_wear_min    215   0.388
+# spike_vibration_mms    198   0.357
+# spike_current_a        218   0.393
+# spike_humidity_pct     225   0.406
+# nan_air_temp_k         449   0.809
+# nan_process_temp_k     484   0.873
+# nan_rot_speed_rpm      454   0.818
+# nan_torque_nm          452   0.815
+# nan_tool_wear_min      460   0.829
+# nan_vibration_mms      455   0.820
+# nan_current_a          453   0.817
+# nan_humidity_pct       429   0.773
+# dropped                  0   0.000
+# is_dup                 367   0.662
+# ts_jittered           2791   5.031>
+
+
+# df = truth[truth["machine_id"] == "CNC-02"]
+# df["process_temp_k"] += 0.35
+# 교안에서는 SettingWithCopyWarning 발생 예시이나 현재 환경에서는 경고 발생하지 않음
+
+print("\n[행 순서 섞임 확인]")
+print("시간순 정렬 여부 :", obs["ts"].is_monotonic_increasing)
+# 시간순 정렬 여부 : False
+
+print("\n[데이터와 마스크 행수 확인]")
+print("관측 데이터 행수 :", len(obs))
+print("마스크 행수 :", len(masks))
+print("행수 일치 여부 :", len(obs) == len(masks))
+# 관측 데이터 행수 : 55471
+# 마스크 행수 : 55471
+# 행수 일치 여부 : True
+
+print("\n[행 삭제 및 중복 검산]")
+dup_count = int(masks["is_dup"].sum())  # 중복으로 추가된 행 개수
+drop_count = len(truth) + dup_count - len(obs)
+# 관측 행수 = 참값 행수 - 삭제 행수 + 중복 행수
+# 따라서 삭제 행수 = 참값 행수 + 중복 행수 - 관측 행수
+check_count = len(truth) - drop_count + dup_count
+# 삭제와 중복을 적용했을 때 최종 행수가 맞는지 다시 계산
+
+print("\n[재검산]")
+print("참값 행수 :", len(truth))
+print("끊김으로 삭제 :", drop_count)
+print("중복으로 추가 :", dup_count)
+print("검산 :", check_count)
+print("실제 관측 행수 :", len(obs))
+# [재검]
+# 참값 행수 : 60480
+# 끊김으로 삭제 : 5376
+# 중복으로 추가 : 367
+# 검산 : 55471
+# 실제 관측 행수 : 55471
