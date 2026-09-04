@@ -142,12 +142,14 @@ def detect_vibration_unit(
 # ----------------------------------------------------------------------
 # 5. 물리 범위 검사
 # ----------------------------------------------------------------------
-def range_check(df: pd.DataFrame, rng: dict | None = None):
-    """범위 밖 값을 NaN으로 바꿉니다. ★ 행을 지우지 않습니다.
 
-    행을 지우면 그 시각의 다른 정상 센서값까지 함께 잃습니다.
-    """
+
+# 센서별 물리적 정상 범위를 기준으로 비정상값 탐지
+# 해당 시각의 다른 정상 센서값을 잃는 것을 방지하기 위해
+# 범위를 벗어난 값만 NaN으로 처리하고 행 자체는 유지
+def range_check(df: pd.DataFrame, rng: dict | None = None):
     rng = rng or PHYS_RANGE
+    # 별도 범위가 없으면 미리 정의한 PHYS_RANGE 사용
     df = df.copy()
     report = {}
     for c, (lo, hi) in rng.items():
@@ -162,12 +164,13 @@ def range_check(df: pd.DataFrame, rng: dict | None = None):
 # ----------------------------------------------------------------------
 # 6. 스파이크 탐지 (Hampel)
 # ----------------------------------------------------------------------
-def hampel_flag(s: pd.Series, window: int = 11, n_sigma: float = 5.0) -> pd.Series:
-    """이동 중앙값에서 n_sigma * MAD 이상 떨어진 점을 True로 표시합니다.
+# 이상치를 삭제하지 않고 플래그로 기록하여 후속 분석 및 모델링 단계에서 활용 가능하도록 설계
 
-    표준편차가 아니라 MAD를 쓰는 이유: 스파이크 자체가 표준편차를 부풀려서
-    정작 그 스파이크를 못 잡습니다(이상치가 자기 기준을 망침).
-    """
+
+# 센서값의 급격한 튐(Spike)을 탐지하여 플래그로 기록
+# 이상치를 삭제하지 않고 표시하여 후속 분석 및 모델링 단계에서 활용
+# Hampel Filter를 적용하여 주변 데이터의 일반적인 변동 범위를 크게 벗어난 값을 탐지
+def hampel_flag(s: pd.Series, window: int = 11, n_sigma: float = 5.0) -> pd.Series:
     med = s.rolling(window, center=True, min_periods=3).median()
     mad = (s - med).abs().rolling(window, center=True, min_periods=3).median()
     sigma = 1.4826 * mad
@@ -175,13 +178,17 @@ def hampel_flag(s: pd.Series, window: int = 11, n_sigma: float = 5.0) -> pd.Seri
     return ((s - med).abs() > n_sigma * sigma).fillna(False)
 
 
-def flag_spikes(df: pd.DataFrame, cols=None, window=11, n_sigma=5.0):
-    """★★ 플래그만 답니다. 지우지 않습니다.
+# 이동 구간의 중앙값을 계산해 주변 센서값의 대표적인 수준을 med로 설정
+# MAD(중앙절대편차)로 센서값이 주변 중앙값에서 일반적으로 얼마나 벗어나는지 계산
+# 표준편차보다 극단값의 영향을 적게 받는 MAD를 사용하여 스파이크 탐지 기준이 흔들리지 않도록 함
 
-    설비 이상은 '값이 튀는 것'으로 나타납니다.
-    스파이크를 무조건 지우면 고장 신호를 지우게 됩니다. (5장에서 실측으로 보여드립니다)
-    """
+
+# 설비별 센서값의 스파이크를 탐지하여 플래그 컬럼으로 기록
+# 센서값의 급격한 변화는 실제 설비 이상 신호일 가능성이 있으므로 이상값을 임의로 삭제하지 않음
+# 원본 센서값은 유지하고 스파이크 여부만 표시하여 후속 분석 및 모델링에 활용
+def flag_spikes(df: pd.DataFrame, cols=None, window=11, n_sigma=5.0):
     cols = cols or SENSOR_COLS
+    # 별도 col 지정이 없으면 위에서 만들어둔 8개 센서 컬럼 전부 검사
     df = df.copy()
     for c in cols:
         if c not in df.columns:
@@ -190,6 +197,7 @@ def flag_spikes(df: pd.DataFrame, cols=None, window=11, n_sigma=5.0):
             lambda s: hampel_flag(s, window, n_sigma)
         )
     spike_cols = [f"spike_{c}" for c in cols if f"spike_{c}" in df.columns]
+    # cols의 센서들을 순회하면서 실제로 생성된 spike_센서명 컬럼만 골라 spike_cols 리스트로 생성
     df["spike_any"] = df[spike_cols].any(axis=1)
     df["spike_count"] = df[spike_cols].sum(axis=1)
     return df
@@ -198,14 +206,15 @@ def flag_spikes(df: pd.DataFrame, cols=None, window=11, n_sigma=5.0):
 # ----------------------------------------------------------------------
 # 7. 결측 보간
 # ----------------------------------------------------------------------
-def interpolate_short_gaps(df: pd.DataFrame, cols=None, max_gap: int = 5):
-    """max_gap분 이하의 짧은 구간만 시간 보간합니다.
 
-    ★ 긴 끊김을 보간하면 '없던 데이터를 만들어내는' 것이 됩니다.
-    30분 통신 두절 구간을 직선으로 채우면 모델은 그 30분을 '아주 안정적인 구간'으로
-    배웁니다. 실제로는 아무 정보가 없는데도 말입니다.
-    """
+
+# 센서 데이터의 짧은 결측 구간을 설비별 시간 흐름에 따라 선형 보간
+# 긴 결측 구간까지 보간하면 실제로 측정되지 않은 구간을 임의의 값으로 채우게 되므로
+# 보간 가능한 결측 개수를 제한하여 실제 데이터의 흐름이 왜곡되는 것을 방지
+# 센서별 실제 보간 개수를 기록하여 정제 결과를 확인
+def interpolate_short_gaps(df: pd.DataFrame, cols=None, max_gap: int = 5):
     cols = cols or SENSOR_COLS
+    # 별도 col 지정이 없으면 위에서 만들어둔 8개 센서 컬럼 전부 검사
     df = df.sort_values(["machine_id", "ts"]).copy()
     filled = {}
     for c in cols:
@@ -224,12 +233,12 @@ def interpolate_short_gaps(df: pd.DataFrame, cols=None, max_gap: int = 5):
 # ----------------------------------------------------------------------
 # 8. 드리프트 보정
 # ----------------------------------------------------------------------
-def estimate_drift(df: pd.DataFrame, col="process_temp_k", ref="air_temp_k"):
-    """설비별로 (col - ref)의 일별 중앙값이 시간에 따라 밀리는지 봅니다.
 
-    같은 라인의 다른 설비를 기준선으로 씁니다.
-    '설비 전체가 같이 오르면 공정 변화, 한 대만 오르면 센서 문제'라는 논리입니다.
-    """
+
+# 공정 온도와 기준 온도의 차이를 이용해 설비별 센서 드리프트를 추정
+# 설비별 일일 중앙값을 전체 설비의 일일 중앙값과 비교하여 개별 설비의 변화만 분리
+# 전체 설비가 함께 변하는 공정 변화와 특정 설비에서만 발생하는 센서 드리프트를 구분
+def estimate_drift(df: pd.DataFrame, col="process_temp_k", ref="air_temp_k"):
     d = df.dropna(subset=[col, ref]).copy()
     d["diff"] = d[col] - d[ref]
     d["day"] = (d["ts"] - d["ts"].min()).dt.total_seconds() / 86400.0
@@ -240,16 +249,20 @@ def estimate_drift(df: pd.DataFrame, col="process_temp_k", ref="air_temp_k"):
         .reset_index()
         .rename(columns={"day": "d"})
     )
+    # v : 설비별·일별 온도 차이의 중앙값을 계산하여 하루의 대표값으로 사용
     fleet = daily.groupby("d")["v"].median().rename("fleet")
+    # fleet : 같은 날 전체 설비의 중앙값을 계산하여 비교 기준으로 사용
     daily = daily.join(fleet, on="d")
     daily["resid"] = daily["v"] - daily["fleet"]
+    # resid = v - fleet : 해당 설비가 전체 설비 기준에서 얼마나 벗어나는지 계산
 
-    out = {}
+    out = {}  # 설비별로 계산한 드리프트 기울기(slope)를 out에 딕셔너리 형태로 저장
     for m, g in daily.groupby("machine_id"):
         if len(g) < 3:
             out[m] = 0.0
             continue
         slope = np.polyfit(g["d"], g["resid"], 1)[0]
+        # slope : 시간에 따른 차이의 기울기를 계산하여 설비별 드리프트 정도 추정
         out[m] = float(slope)
     return out, daily
 
