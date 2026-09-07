@@ -1,0 +1,17 @@
+# DB는 CSV로부터 재생성됩니다 (src/build_db.py). 바이너리라 git diff가 안 보입니다.
+data/sensors.db
+data/*.parquet
+data/clean_sim.csv
+data/truth_sim.csv
+
+# 원본 공개 데이터셋 — 용량이 크고 저작권 주체가 UCI입니다.
+# 다운로드 스크립트(src/download_data.py)로 누구나 재현할 수 있게 합니다.
+data/raw/
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+.venv/
+venv/
+outputs/figures/
