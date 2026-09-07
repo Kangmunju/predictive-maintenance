@@ -108,6 +108,7 @@ F1이 최대인 지점과 비용이 최소인 지점도 서로 달랐습니다.
 predictive-maintenance/
 ├── README.md
 ├── requirements.txt
+├── run_all.py                    # 전체 재현 실행 스크립트
 ├── .github/
 │   └── workflows/
 │       └── collect.yml          # GitHub Actions 센서 데이터 자동 수집
