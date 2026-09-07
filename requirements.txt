@@ -1,0 +1,12 @@
+# 대시보드 배포(Streamlit Community Cloud)와 GitHub Actions에서 함께 씁니다.
+# 버전을 고정한 이유: "내 PC에선 됐는데 배포하면 안 되는" 사고를 막기 위해서입니다.
+numpy==2.0.2
+pandas==2.3.3
+scipy==1.13.1
+scikit-learn==1.6.1
+matplotlib==3.9.4
+seaborn==0.13.2
+statsmodels==0.14.6
+streamlit==1.50.0
+requests==2.32.5
+pyarrow==21.0.0
