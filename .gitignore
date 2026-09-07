@@ -15,3 +15,16 @@ __pycache__/
 .venv/
 venv/
 outputs/figures/
+
+
+# 로컬 검증용 과거 수집 데이터
+data/history/2024-*.csv
+
+# 분석 중간 산출물
+analysis/a8_quality_metrics.py
+data/ai4i_probs.npy
+data/ai4i_test_pred.csv
+data/leakage_result.csv
+data/secom_result.csv
+data/sim_test_pred.csv
+data/threshold_curve.csv
