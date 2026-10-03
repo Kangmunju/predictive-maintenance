@@ -1,16 +1,16 @@
 {
-  "n_rows": 100659,
+  "n_rows": 104352,
   "n_features": 100,
   "horizon_min": 30,
-  "train_end": "2026-09-26 09:23:00",
-  "test_start": "2026-09-26 09:23:00",
-  "positive_rate_test": 0.2177,
-  "roc_auc": 0.9091,
-  "pr_auc": 0.7659,
-  "threshold": 0.08,
-  "precision": 0.4043,
-  "recall": 0.9438,
-  "f1": 0.5661,
-  "cost_at_threshold": 4749400000,
-  "cost_at_0.5": 16983600000
+  "train_end": "2026-09-27 02:11:00",
+  "test_start": "2026-09-27 02:11:00",
+  "positive_rate_test": 0.2033,
+  "roc_auc": 0.8973,
+  "pr_auc": 0.7373,
+  "threshold": 0.03,
+  "precision": 0.2941,
+  "recall": 0.9627,
+  "f1": 0.4506,
+  "cost_at_threshold": 5259300000,
+  "cost_at_0.5": 16921700000
 }
