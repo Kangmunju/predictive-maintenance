@@ -114,12 +114,27 @@ with tab1:
     c[0].metric("수집 행수", f"{len(raw):,}")
     c[1].metric("설비 수", raw["machine_id"].nunique())
     c[2].metric("데이터 존재 일수", f"{raw['ts'].dt.normalize().nunique():,}일")
+
+    # 실제 데이터에 포함된 연도를 확인하여 안내 문구 구성
+    years = sorted(raw["ts"].dt.year.dropna().unique())
+
+    if len(years) > 1:
+        data_description = (
+            f"{', '.join(map(str, years))}년 데이터가 포함되어 있으며, "
+            "중간의 미수집 기간은 데이터 존재 일수에 포함하지 않습니다."
+        )
+    else:
+        data_description = (
+            f"{years[0]}년 수집 데이터를 기준으로 계산했으며, "
+            "데이터가 존재하지 않는 날짜는 포함하지 않습니다."
+        )
+
     st.caption(
         f"데이터 범위: {raw['ts'].min():%Y-%m-%d} ~ "
         f"{raw['ts'].max():%Y-%m-%d} | "
-        "2024년 초기 시뮬레이션과 2026년 자동 수집 데이터를 포함하며, "
-        "중간의 미수집 기간은 데이터 존재 일수에 포함하지 않습니다."
+        f"{data_description}"
     )
+
     fr = raw["machine_failure"].mean() * 100 if "machine_failure" in raw else np.nan
     c[3].metric("고장 발생률", f"{fr:.2f}%")
 
@@ -434,6 +449,8 @@ st.caption("소스: https://github.com/Kangmunju/predictive-maintenance")
 #    - 해결: ts.dt.normalize().nunique()로 실제 데이터 존재 날짜만 집계
 #    - 결과: 기존 1,014일 → 실제 데이터 존재 일수 49일로 수정
 #    - 최초·최종 날짜를 별도 표시하여 전체 데이터 범위와 수집 일수 구분
+#    - 로컬과 배포 환경의 데이터 구성이 달라도 동일한 연도 설명이 표시됨
+#    - 해결: 실제 로드된 데이터의 연도를 확인하여 환경에 맞는 안내 문구를 동적으로 생성
 #
 # 5. 호환성 및 검증
 #    - metrics.json에 에피소드 평가 결과가 없는 경우 경고를 표시하고 기존 기능 유지
