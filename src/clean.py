@@ -96,11 +96,35 @@ def snap_timestamp(df: pd.DataFrame, freq: str = "min") -> pd.DataFrame:
 
 
 # 동일 설비·동일 시각의 중복 데이터 중 가장 나중에 수집된 값 유지
+# collected_at까지 동일한 경우 센서값을 추가 정렬 기준으로 사용해
+# 입력 행 순서가 달라도 동일한 행이 선택되도록 결정성 확보
 def drop_dups(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # 수집 시각이 같을 때의 동률 해소 기준
+    # 센서 컬럼과 그 외 컬럼을 고정된 이름 순서로 정렬
+    tie_cols = sorted(
+        c for c in df.columns if c not in ("machine_id", "ts", "collected_at")
+    )
+
+    sort_cols = [
+        c for c in ["machine_id", "ts", "collected_at"] if c in df.columns
+    ] + tie_cols
+
     return (
-        df.sort_values("collected_at")
-        .drop_duplicates(subset=["machine_id", "ts"], keep="last")
-        .sort_values(["machine_id", "ts"])
+        df.sort_values(
+            sort_cols,
+            kind="stable",
+            na_position="first",
+        )
+        .drop_duplicates(
+            subset=["machine_id", "ts"],
+            keep="last",
+        )
+        .sort_values(
+            ["machine_id", "ts"],
+            kind="stable",
+        )
         .reset_index(drop=True)
     )
 
@@ -524,6 +548,7 @@ def run_pipeline(
 # pandas와 NumPy를 이용해 센서 데이터의 9단계 정제 파이프라인 구현
 # 단위 통일, 물리 범위 검사, 스파이크 탐지, 결측 보간, 드리프트 보정 수행
 # StepLog로 단계별 행 수와 증감을 기록하도록 구현
+# 동일 설비·시각의 중복 데이터에서 가장 나중에 수집된 값을 유지하도록 구현
 
 # 온도값 200 미만을 모두 섭씨로 변환하면 오류값 0도 273.15K로 바뀌는 문제 확인
 # 0을 먼저 NaN 처리하고 0.1~60℃ 범위만 섭씨 혼입값으로 판단하도록 수정
@@ -535,6 +560,10 @@ def run_pipeline(
 # 학습용 결측 처리에 과거값 기반 제한적 전방 채움을 적용
 # 전체 기간 통계를 사용하는 드리프트 보정은 학습용 정제에서 생략
 # 기존 run_pipeline() 기본 실행 방식과 9단계 로그 구조 유지
+
+# collected_at이 동일한 중복 데이터에 추가 정렬 기준을 적용해 동률 해소
+# 센서값을 포함한 컬럼별 정렬 기준으로 입력 행 순서에 따른 결과 차이 방지
+# stable 정렬을 적용해 중복 제거 과정의 정렬 동작을 명시적으로 고정
 
 # 추후 보완 사항
 # 1. 학습·검증·테스트 분할 이전의 전역 전처리로 인한 데이터 누수 방지
