@@ -311,8 +311,8 @@ axes[1].set_title("PR 곡선 — 현실은 이쪽입니다")
 axes[1].legend(fontsize=8)
 fig.tight_layout()
 save(fig, "ai4i_roc_pr")
-# 실제 경로
-# C:\Users\swrkd\Desktop\predictive-maintenance\outputs\figures\pd_ai4i_roc_pr.png
+# 그래프 저장 경로 (프로젝트 루트 기준)
+# outputs/figures/pd_ai4i_roc_pr.png
 
 # ----------------------------------------------------------------------
 rule("A2-6. 고장 모드별로 나눠 보면 — 왜 어떤 고장은 못 잡나")

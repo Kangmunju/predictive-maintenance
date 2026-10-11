@@ -30,6 +30,8 @@ jobs:
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: 파이썬 설치
         uses: actions/setup-python@v5
@@ -205,21 +207,63 @@ jobs:
           print("[OK] CSV 중복 검증 완료")
           PY
 
+      # 학습 실패를 성공으로 숨기지 않음
+      # 실패하더라도 아래 커밋 단계에서 수집 CSV는 보존
       - name: 모델 재학습 (데이터가 충분할 때만)
-        continue-on-error: true      # ★ 학습이 실패해도 수집은 살립니다
+        id: train
         run: python src/train.py
 
+      # 모델 재학습이 실패해도 수집된 CSV는 GitHub에 저장
+      # 수집 및 CSV 검증이 정상적으로 끝난 경우에만 실행
       - name: 변경사항 커밋
+        if: ${{ success() || (failure() && steps.train.outcome == 'failure') }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/history models
+          # 수집 CSV는 학습 성공 여부와 관계없이 보존
+          git add data/history
+
+          # 학습에 성공한 경우에만 모델 산출물을 커밋
+          # 대용량 test_predictions.csv는 자동 커밋 대상에서 제외
+          if [ "${{ steps.train.outcome }}" = "success" ]; then
+            git add -f models/metrics.json models/feature_importance.csv
+          else
+            echo "[WARN] 모델 학습 실패: 모델 산출물 커밋 제외"
+          fi
 
           # 변경이 없으면 commit이 실패하므로 미리 확인
           if git diff --staged --quiet; then
             echo "변경 없음. 커밋을 건너뜁니다."
           else
             git commit -m "chore(data): 센서 데이터 자동 수집 $(date -u +'%Y-%m-%d')"
-            git push
+
+            # 원격 브랜치에 다른 커밋이 추가된 경우 먼저 반영
+            git pull --rebase origin main
+
+            # 충돌이 발생하면 실패 처리하여 자동 덮어쓰기를 방지
+            git push origin HEAD:main
           fi
+
+
+
+# ----------------------------------------------------------------------
+# [구현 핵심]
+# ----------------------------------------------------------------------
+# GitHub Actions를 이용한 매일 오전 6시(KST) 센서 데이터 자동 수집 구성
+# 기존 CSV의 observed_at을 기준으로 수집 공백을 확인하도록 구현
+# 수집 공백을 하루 단위로 나누어 복구하고 CSV 중복 여부를 검증
+# SQLite DB는 Git에 커밋하지 않고 CSV를 수집 이력으로 사용
+# 동시 실행에 따른 데이터 충돌을 방지하도록 concurrency 설정
+
+# 모델 재학습의 continue-on-error 옵션을 제거해 실패를 명확히 표시
+# 학습 실패 시에도 수집 CSV를 커밋하도록 조건부 실행 적용
+# 학습 성공 시에만 모델 평가 산출물을 커밋하도록 개선
+# 대용량 test_predictions.csv를 자동 스테이징 대상에서 제외
+# git pull --rebase를 적용해 원격 변경사항을 반영한 뒤 푸시하도록 개선
+# 수집 또는 CSV 검증 실패 시에는 이후 학습·커밋을 진행하지 않도록 유지
+
+# 추후 보완 사항
+# 1. GitHub Actions 실제 실행으로 성공·실패 분기 검증
+# 2. 장기간 수집 공백 발생 시 실행 시간과 복구 비용 관리
+# 3. 원격 브랜치와 충돌 발생 시 자동 복구 또는 알림 체계 검토
