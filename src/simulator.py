@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+
 # ----------------------------------------------------------------------
 # 설비 스펙
 # ----------------------------------------------------------------------
@@ -68,6 +69,7 @@ def _simulate_one(
     wear = np.zeros(n_minutes)
     acc = rng.uniform(0, 60)  # 시작 시점 마모도는 랜덤
     limit = tool_life * rng.uniform(0.90, 1.15)
+
     for i in range(n_minutes):
         acc += wear_rate[i]
         if acc > limit:  # 계획 교체 (정비반 재량으로 조금씩 다름)
@@ -192,6 +194,7 @@ def pollute(
     c = dict(POLLUTION)
     if cfg:
         c.update(cfg)
+
     rng = np.random.default_rng(seed)
     df = truth.copy()
     masks = pd.DataFrame(index=df.index)
@@ -210,13 +213,19 @@ def pollute(
     # --- (b) 단위 혼재: 특정 구간에서 온도가 섭씨로 들어옴 ---
     n = len(df)
     unit_block = np.zeros(n, dtype=bool)
-    n_blocks = max(1, int(n * c["unit_mix_rate"] / 200))
-    for _ in range(n_blocks):
-        s = rng.integers(0, n - 200)
-        unit_block[s : s + 200] = True
+
+    if n > 0:
+        n_blocks = max(1, int(n * c["unit_mix_rate"] / 200))
+        block_len = min(200, n)
+
+        for _ in range(n_blocks):
+            s = rng.integers(0, n - block_len + 1)
+            unit_block[s : s + block_len] = True
+
     df.loc[unit_block, "air_temp_k"] -= 273.15
     df.loc[unit_block, "process_temp_k"] -= 273.15
     masks["unit_temp"] = unit_block
+
     # 진동 단위도 일부는 m/s^2 로 (×9.81)
     vib_block = rng.random(n) < 0.04
     df.loc[vib_block, "vibration_mms"] *= 9.81
@@ -273,7 +282,7 @@ def pollute(
 
     # --- (h) 실제 수집기가 붙이는 메타 컬럼 ---
     df["collected_at"] = pd.Timestamp("2024-01-01")
-    df["ts"] = df["ts"].dt.strftime("%Y-%m-%d %H:%M:%S")  # 문자열로 들어옴(현실)
+    df["ts"] = df["ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
     if return_masks:
         return df, kept_masks
     return df
@@ -282,22 +291,182 @@ def pollute(
 # ----------------------------------------------------------------------
 # 3) 실시간 수집용: "지금부터 n분 치"
 # ----------------------------------------------------------------------
+LIVE_EPOCH = pd.Timestamp("2026-09-01 00:00:00")
+LIVE_SEED = 20260901
+
+
+def _live_rng(machine_index: int, minute_index: int, stream: int, seed: int):
+    """설비·관측 시각·난수 용도에 따라 동일한 난수를 생성함."""
+    return np.random.default_rng(
+        np.random.SeedSequence([seed, machine_index, minute_index % (2**32), stream])
+    )
+
+
+def _live_one(machine_id: str, ts: pd.Timestamp, seed: int) -> dict:
+    """수집 구간과 관계없이 동일한 설비·시각의 참값을 생성함."""
+    machine_index = list(MACHINES).index(machine_id)
+    spec = MACHINES[machine_id]
+    minute_index = int((ts - LIVE_EPOCH).total_seconds() // 60)
+    rng = _live_rng(machine_index, minute_index, 0, seed)
+
+    hour = ts.hour + ts.minute / 60.0
+    duty = float(
+        np.clip(
+            0.55 + 0.45 * np.sin((hour - 6) / 24 * 2 * np.pi) + rng.normal(0, 0.05),
+            0.05,
+            1.0,
+        )
+    )
+
+    # 공구 마모도는 절대 시간에 따라 결정하고, 고정 교체 주기마다 초기화함
+    cycle_minutes = max(1, int(spec["tool_life"] / 1.30))
+    phase = (minute_index + machine_index * 37) % cycle_minutes
+    wear = phase * 1.30 + 0.20 * duty
+
+    # 공기 온도에 하루 주기와 장기적인 완만한 변동을 반영함
+    air = (
+        298.0
+        + 2.0 * np.sin((hour - 14) / 24 * 2 * np.pi)
+        + 0.8 * np.sin(minute_index * 2 * np.pi / (1440 * 17))
+        + rng.normal(0, 0.15)
+    )
+
+    rpm = float(np.clip(2860 - 1500 * duty + rng.normal(0, 45), 1150, 2900))
+    torque = float(np.clip(10 + 40 * duty + 0.02 * wear + rng.normal(0, 2), 3, 80))
+    power_w = torque * rpm * 2 * np.pi / 60.0
+
+    # HVAC 이상도 수집 시점과 무관한 고정 시간 구간에서 발생함
+    hvac_fail = ((minute_index + machine_index * 31) % (7 * 1440)) < 75
+    air += 5.5 * hvac_fail
+
+    proc = air + 8.5 + power_w / 1400.0 + 0.004 * wear
+    proc -= 6.0 * hvac_fail
+    proc += rng.normal(0, 0.12)
+
+    vib = max(
+        0.1,
+        0.8
+        + 0.0009 * rpm
+        + 0.9 * (wear / spec["tool_life"]) ** 3
+        + rng.normal(0, 0.06),
+    )
+    current = max(0.2, power_w / (380 * 1.732 * 0.85) + rng.normal(0, 0.15))
+    humidity = float(np.clip(55 - 1.8 * (air - 298) + rng.normal(0, 2.5), 15, 95))
+
+    twf = 200 <= wear <= 240 and rng.random() < 0.004
+    hdf = (proc - air) < 8.6 and rpm < 1380
+    pwf = power_w < 3500 or power_w > 9000
+    osf = wear * torque > spec["osf_limit"]
+    rnf = rng.random() < 0.0002
+
+    return {
+        "ts": ts,
+        "machine_id": machine_id,
+        "type": spec["type"],
+        "air_temp_k": air,
+        "process_temp_k": proc,
+        "rot_speed_rpm": rpm,
+        "torque_nm": torque,
+        "tool_wear_min": wear,
+        "vibration_mms": vib,
+        "current_a": current,
+        "humidity_pct": humidity,
+        "machine_failure": int(twf or hdf or pwf or osf or rnf),
+    }
+
+
+def _live_pollute(row: dict, seed: int) -> dict | None:
+    """관측 시각을 기준으로 동일한 오염을 재현함."""
+    ts = row["ts"]
+    machine_index = list(MACHINES).index(row["machine_id"])
+    minute_index = int((ts - LIVE_EPOCH).total_seconds() // 60)
+
+    rng = _live_rng(machine_index, minute_index, 1, seed)
+    out = row.copy()
+
+    # 통신 끊김을 10분 블록 단위로 적용함
+    block_index = minute_index // 10
+    block_rng = _live_rng(machine_index, block_index, 2, seed)
+    if block_rng.random() < POLLUTION["dropout_rate"]:
+        return None
+
+    # CNC-02의 센서 드리프트는 30일마다 보정된다고 가정함
+    if machine_index == 1:
+        elapsed_days = max(0.0, minute_index / 1440.0)
+        out["process_temp_k"] += POLLUTION["drift_per_day"] * (elapsed_days % 30)
+
+    # 온도 단위 혼재를 고정 시간 블록에 적용함
+    unit_rng = _live_rng(machine_index, minute_index // 200, 3, seed)
+    if unit_rng.random() < POLLUTION["unit_mix_rate"]:
+        out["air_temp_k"] -= 273.15
+        out["process_temp_k"] -= 273.15
+
+    # 진동 단위 혼재
+    if rng.random() < 0.04:
+        out["vibration_mms"] *= 9.81
+
+    # 센서별 이상치와 결측
+    for col in SENSOR_COLS:
+        if rng.random() < POLLUTION["spike_rate"]:
+            if rng.random() < 0.5:
+                out[col] *= rng.uniform(8, 40)
+            else:
+                out[col] = 0.0
+
+        if rng.random() < POLLUTION["nan_rate"]:
+            out[col] = np.nan
+
+    # 타임스탬프 흔들림
+    if rng.random() < POLLUTION["ts_jitter_rate"]:
+        out["ts"] = ts + pd.Timedelta(seconds=int(rng.integers(-90, 90)))
+
+    # ts는 수집된 타임스탬프, observed_at은 오염 전 관측 기준 시각
+    out["observed_at"] = ts.strftime("%Y-%m-%d %H:%M:%S")
+    out["ts"] = out["ts"].strftime("%Y-%m-%d %H:%M:%S")
+
+    # collected_at은 실제 실행 시각을 의미함
+    out["collected_at"] = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M:%S")
+    return out
+
+
 def sample_window(
     n_minutes: int = 60, end: pd.Timestamp | None = None, seed: int | None = None
 ) -> pd.DataFrame:
-    """수집기가 호출하는 함수. 최근 n분 구간의 관측 데이터를 돌려줍니다."""
-    end = pd.Timestamp.utcnow().floor("min") if end is None else pd.Timestamp(end)
+    """자동 수집용 관측 데이터를 지정된 시간 구간에 생성함."""
+    if n_minutes <= 0:
+        raise ValueError("n_minutes는 양수여야 합니다.")
+
+    if end is None:
+        end = pd.Timestamp.now(tz="UTC").tz_localize(None).floor("min")
+    else:
+        end = pd.Timestamp(end)
+
+    if end.tzinfo is not None:
+        end = end.tz_convert("UTC").tz_localize(None)
+
+    end = end.floor("min")
     start = end - pd.Timedelta(minutes=n_minutes)
-    # 시드를 날짜에서 뽑으면 같은 날 다시 돌려도 같은 값이 나옴 (재현성)
-    # 시작 시각을 이용해 seed 값을 생성
-    # 같은 수집 구간을 다시 실행하면 같은 seed가 생성되므로 동일한 센서 데이터를 다시 생성 가능
-    # 이를 통해 같은 데이터를 재수집하더라도 DB에 중복 저장되지 않는 지 확인 가능
-    if seed is None:
-        seed = int(start.strftime("%Y%m%d%H"))
-    truth = simulate_truth(n_minutes=n_minutes, start=start, seed=seed)
-    obs = pollute(truth, seed=seed + 1)
-    obs["collected_at"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    return obs
+    effective_seed = LIVE_SEED if seed is None else int(seed)
+
+    records = []
+
+    for ts in pd.date_range(start, periods=n_minutes, freq="min"):
+        for machine_id in MACHINES:
+            truth = _live_one(machine_id, ts, effective_seed)
+            observed = _live_pollute(truth, effective_seed)
+            if observed is not None:
+                records.append(observed)
+
+    columns = [
+        "ts",
+        "machine_id",
+        "type",
+        *SENSOR_COLS,
+        "machine_failure",
+        "observed_at",
+        "collected_at",
+    ]
+    return pd.DataFrame.from_records(records, columns=columns)
 
 
 if __name__ == "__main__":
@@ -316,11 +485,49 @@ if __name__ == "__main__":
 # 1440분 * 3대 = 4320행 -> 3대 설비의 하루치 1분 단위 원본 참값 데이터
 
 # observed: (3983, 13)
-# dropout등의 처리를 했기 때문에 truth보다 행 수가 줄어든 걸 확인
-# 실제로 pullute() 함수에 누락, 중복, 시간 흔들림 같은 오염 코드를 작성함
+# dropout 등의 처리를 했기 때문에 truth보다 행 수가 줄어든 걸 확인
+# 실제로 pollute() 함수에 누락, 중복, 시간 흔들림 같은 오염 코드를 작성함
 
 #                     ts machine_id type  air_temp_k  process_temp_k  rot_speed_rpm  torque_nm  tool_wear_min  vibration_mms  current_a  humidity_pct  machine_failure collected_at
 # 0  2024-01-01 13:17:00     CNC-02    M  298.625851      313.422285    1406.052695  49.563036     214.189992       2.694331  12.776496     54.273886                0   2024-01-01
 # 1  2024-01-01 17:31:00     CNC-03    H  299.465280      314.813583    1863.785516  43.060944     228.093245       3.187122  15.337023     53.284947                0   2024-01-01
-# 2  2024-01-01 04:57:00     CNC-02    M  296.731156      310.754775    2237.713224  30.457300     136.175066       3.042451  12.643848     57.330195                0   2024-01-01
+# 2  2024-01-01 04:57:00     CNC-02    M  296.731156      310.754775    2237.713224  30.457300     136.175066     3.042451  12.643848     57.330195                0   2024-01-01
 # 현재 출력된 표는 observed의 일부임에 주의!
+
+
+# =============================================================================
+# [구현 핵심]
+# =============================================================================
+
+# CNC 설비 3대의 공정 부하, 온도, 회전수, 토크, 공구 마모도 등 센서 데이터를 생성함
+# 공정 부하와 회전수, 마모도와 토크 및 진동 사이의 물리적 관계를 반영함
+# AI4I 2020의 고장 규칙을 적용해 설비별 고장 여부를 생성함
+# simulate_truth()로 오염 없는 참값을 생성함
+# pollute()로 드리프트, 단위 혼재, 이상치, 결측, 통신 끊김, 중복 등을 주입함
+# 참값과 관측값을 분리해 전처리 결과를 검증할 수 있도록 구현함
+
+# 기존 sample_window()는 수집 구간마다 참값과 오염을 새로 생성하는 방식이었음
+# 이로 인해 동일한 관측 시각의 센서값과 공구 마모도가 수집 구간에 따라 달라질 수 있었음
+# 기존 실험용 함수는 유지하고 자동 수집 전용 _live_one(), _live_pollute()를 추가함
+# _live_rng()로 설비 ID와 절대 시각을 기준으로 동일한 난수를 생성하도록 구현함
+# sample_window()가 자동 수집 전용 함수를 호출하도록 수정함
+
+# 공구 마모도와 교체 주기를 절대 시간에 연결해 수집 실행마다 초기화되지 않도록 수정함
+# CNC-02의 센서 드리프트가 누적되고 30일마다 보정되도록 구현함
+# 결측, 이상치, 통신 끊김, 단위 혼재 등을 동일한 관측 시각에 재현하도록 수정함
+# 자동 수집에서는 중복 행을 별도로 생성하지 않도록 변경함
+
+# 수집 구간을 시작 시각 포함, 종료 시각 제외 방식으로 구현함
+# 자동 수집의 기본 시각을 UTC 기준으로 통일함
+# observed_at에 원래 관측 시각을, collected_at에 실제 수집 시각을 기록하도록 추가함
+# ts에 타임스탬프 흔들림을 적용하고 관측 기준 시각과 구분하도록 수정함
+# 별도의 상태 저장 파일 없이 절대 시각을 기준으로 설비 상태를 재현하도록 구현함
+
+# 추후 보완 사항
+# 1. 고정 주기 기반 공구 교체를 부하에 따른 누적 마모 및 정비 이력 기반으로 개선
+# 2. 고정된 30일 센서 보정 주기를 실제 보정 이력 기반으로 개선
+# 3. 기존 수집 데이터와 변경된 시뮬레이터의 생성 방식 차이 검증
+# 4. 타임스탬프 흔들림으로 발생할 수 있는 관측 시각 충돌 검증
+# 5. observed_at 추가에 따른 CSV 및 DB 저장 구조 호환성 확인 (collector.py, db.py)
+# 6. 수집 공백 복구 및 날짜별 데이터 저장 방식 개선 (collector.py)
+# 7. 자동 수집 일정과 중복 수집 방지 동작 검증 (collect.yml)

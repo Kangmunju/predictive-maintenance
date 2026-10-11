@@ -1,24 +1,32 @@
+
 name: collect-sensor-data
 
-# ★ 공개 저장소면 GitHub Actions가 무료(무제한)입니다. 카드 등록 필요 없습니다.
-#   비공개 저장소는 월 2,000분 무료입니다. 이 워크플로는 1회 1분 남짓이라
-#   매일 돌려도 월 40분 정도만 씁니다.
+# ★ 공개 저장소의 표준 GitHub 호스팅 러너는 일반적으로 무료로 제공됩니다.
+#   비공개 저장소는 계정 및 요금제에 따른 사용량 제한이 적용됩니다.
+#   실제 실행 시간과 사용량은 GitHub Actions에서 확인합니다.
 
 on:
   schedule:
-    # UTC 기준입니다. 21:00 UTC = 한국시간 06:00
-    # ★ 주의: GitHub의 스케줄은 정시에 안 돌 때가 많습니다(최대 수십 분 지연).
+    # UTC 기준입니다. 21:00 UTC = 한국시간 다음 날 06:00
+    # ★ 주의: GitHub의 스케줄은 정시에 안 돌 때가 많습니다.
     #   "정확히 매일 6시"가 필요한 작업이면 Actions는 맞지 않습니다.
     - cron: "0 21 * * *"
-  workflow_dispatch:        # 버튼으로 수동 실행 (테스트용 — 이거 꼭 넣으세요)
+
+  workflow_dispatch:        # 버튼으로 수동 실행 (테스트용)
 
 # 저장소에 커밋하려면 쓰기 권한이 필요합니다
 permissions:
   contents: write
 
+# 동일 워크플로가 동시에 실행되어 같은 CSV를 수정하지 않도록 방지
+concurrency:
+  group: collect-sensor-data
+  cancel-in-progress: false
+
 jobs:
   collect:
     runs-on: ubuntu-latest
+
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
@@ -34,19 +42,167 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 센서 데이터 수집 (최근 24시간)
-        run: python src/collector.py --minutes 1440
+      # SQLite DB는 Git에 커밋하지 않으므로
+      # 이전 수집 상태를 DB가 아닌 CSV에서 확인해야 함
+      #
+      # 기존 CSV 중 observed_at이 있는 신규 데이터만 복구 기준으로 사용
+      # 과거 데이터에는 observed_at이 없으므로 임의로 복원하지 않음
+      #
+      # 수집 공백이 7일보다 길더라도 하루 단위로 나누어 순서대로 복구
+      # collector.py의 --recover 대신 명시적인 --minutes, --end를 사용
+      - name: 센서 데이터 수집 (CSV 기반 공백 복구)
+        run: |
+          python - <<'PY'
+          import glob
+          import subprocess
+          import sys
+
+          import pandas as pd
+
+          files = sorted(
+              glob.glob("data/history/*.csv"),
+              reverse=True,
+          )
+
+          last = None
+
+          # 가장 최근 날짜의 CSV부터 확인
+          # observed_at이 없는 과거 CSV는 복구 기준에서 제외
+          for path in files:
+              df = pd.read_csv(path)
+
+              if "observed_at" not in df.columns:
+                  continue
+
+              observed = pd.to_datetime(
+                  df["observed_at"],
+                  errors="coerce",
+                  utc=True,
+              ).dropna()
+
+              if observed.empty:
+                  continue
+
+              candidate = observed.max()
+
+              if last is None or candidate > last:
+                  last = candidate
+
+          # 현재 UTC 시각의 분 단위까지 수집
+          end = pd.Timestamp.now(tz="UTC").floor("min")
+
+          if last is None:
+              # 신규 관측 데이터가 없는 최초 실행
+              # 과거 전체 기간을 임의로 복구하지 않고 최근 하루만 수집
+              start = end - pd.Timedelta(minutes=1440)
+
+              print(
+                  "[INFO] 기존 observed_at 없음: "
+                  "최근 1,440분 최초 수집",
+                  flush=True,
+              )
+          else:
+              # 마지막으로 저장된 관측 시각의 다음 분부터 복구
+              start = last.floor("min") + pd.Timedelta(minutes=1)
+
+              print(
+                  f"[INFO] 마지막 관측 시각: {last}",
+                  flush=True,
+              )
+
+          if start >= end:
+              print(
+                  "[INFO] 새로 수집할 구간이 없습니다.",
+                  flush=True,
+              )
+              sys.exit(0)
+
+          # 한 번에 최대 하루치씩 생성
+          # 7일 이상 공백이 생겨도 구간을 나누어 전부 복구
+          cursor = start
+          count = 0
+
+          while cursor < end:
+              chunk_end = min(
+                  cursor + pd.Timedelta(minutes=1440),
+                  end,
+              )
+
+              minutes = int(
+                  (chunk_end - cursor).total_seconds() // 60
+              )
+
+              if minutes <= 0:
+                  break
+
+              count += 1
+
+              end_arg = chunk_end.strftime(
+                  "%Y-%m-%d %H:%M:%S"
+              )
+
+              print(
+                  f"[INFO] 수집 {count}회차: "
+                  f"{cursor} ~ {chunk_end} "
+                  f"({minutes:,}분)",
+                  flush=True,
+              )
+
+              # collector.py에서 날짜별 CSV 분리 및 중복 방지
+              subprocess.run(
+                  [
+                      sys.executable,
+                      "src/collector.py",
+                      "--minutes",
+                      str(minutes),
+                      "--end",
+                      end_arg,
+                  ],
+                  check=True,
+              )
+
+              cursor = chunk_end
+
+          print(
+              f"[OK] 수집 완료: 총 {count}개 구간",
+              flush=True,
+          )
+          PY
 
       - name: 수집 결과 확인
         run: |
           echo "=== data/history ==="
           ls -la data/history | tail -5
+
           python - <<'PY'
-          import glob, pandas as pd
+          import glob
+          import pandas as pd
+
           files = sorted(glob.glob("data/history/*.csv"))
           n = sum(len(pd.read_csv(f)) for f in files)
+
           print(f"파일 {len(files)}개 / 누적 {n:,}행")
+
           assert n > 0, "수집된 행이 0입니다"
+
+          # 신규 데이터의 관측 시각 중복 여부 확인
+          for path in files:
+              df = pd.read_csv(path)
+
+              if "observed_at" not in df.columns:
+                  continue
+
+              current = df[df["observed_at"].notna()]
+
+              duplicated = current.duplicated(
+                  subset=["machine_id", "observed_at"]
+              ).sum()
+
+              assert duplicated == 0, (
+                  f"{path}: 관측 시각 중복 {duplicated}건"
+              )
+
+          print("[OK] CSV 중복 검증 완료")
           PY
 
       - name: 모델 재학습 (데이터가 충분할 때만)
@@ -57,8 +213,10 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add data/history models
-          # 변경이 없으면 commit이 실패해서 워크플로가 빨개집니다 → 미리 걸러냅니다
+
+          # 변경이 없으면 commit이 실패하므로 미리 확인
           if git diff --staged --quiet; then
             echo "변경 없음. 커밋을 건너뜁니다."
           else
