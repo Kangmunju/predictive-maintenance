@@ -15,6 +15,10 @@
 9) 시간축 재색인    빠진 분을 명시적으로 드러낸다
 
 모든 단계는 StepLog에 행 수를 남깁니다.
+
+학습용 정제:
+- causal=True로 실행하면 미래 센서값 참조를 제한합니다.
+- 드리프트 보정은 미래 기간 통계가 필요하므로 적용하지 않습니다.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ PHYS_RANGE = {
     "current_a": (0.1, 40.0),
     "humidity_pct": (0.0, 100.0),
 }
+
 
 # 명백히 불가능한 센서값만 NaN 처리하고 행은 유지하도록 설계
 
@@ -145,12 +150,28 @@ def detect_vibration_unit(
     col="vibration_mms",
     factor=9.81,
     ratio=4.0,
+    causal: bool = False,
 ):
     df = df.copy()
 
-    med = df.groupby("machine_id")[col].transform("median")
+    if causal:
+        # 전체 기간의 중앙값을 사용하면 미래 측정값이
+        # 과거 시점의 단위 판정에 영향을 줄 수 있습니다.
+        #
+        # 현재 값은 제외하고 설비별 과거 관측값만 사용합니다.
+        # 최소 3개 이상의 과거 값이 있어야 판정합니다.
+        ordered = df.sort_values(["machine_id", "ts"])
 
-    mask = df[col].notna() & (df[col] > med * ratio)
+        med = (
+            ordered.groupby("machine_id")[col]
+            .transform(lambda s: s.shift(1).expanding(min_periods=3).median())
+            .reindex(df.index)
+        )
+    else:
+        # 기존 전체 데이터 기준 중앙값
+        med = df.groupby("machine_id")[col].transform("median")
+
+    mask = df[col].notna() & med.notna() & (df[col] > med * ratio)
     df.loc[mask, col] = df.loc[mask, col] / factor
 
     return df, int(mask.sum())
@@ -190,10 +211,47 @@ def hampel_flag(
     s: pd.Series,
     window: int = 11,
     n_sigma: float = 5.0,
+    causal: bool = False,
 ) -> pd.Series:
-    med = s.rolling(window, center=True, min_periods=3).median()
 
-    mad = (s - med).abs().rolling(window, center=True, min_periods=3).median()
+    if causal:
+        # 현재 값을 제외한 과거 window개 관측치로
+        # 중앙값과 MAD를 계산합니다.
+        #
+        # 과거 기준 중앙값과의 차이를 먼저 구하고,
+        # 그 차이의 과거 분포로 스파이크 여부를 판단합니다.
+        history = s.shift(1)
+
+        med = history.rolling(
+            window,
+            min_periods=3,
+        ).median()
+
+        deviations = (history - med).abs()
+
+        mad = deviations.rolling(
+            window,
+            min_periods=3,
+        ).median()
+
+    else:
+        # 기존 사후 분석용 Hampel 필터
+        med = s.rolling(
+            window,
+            center=True,
+            min_periods=3,
+        ).median()
+
+        mad = (
+            (s - med)
+            .abs()
+            .rolling(
+                window,
+                center=True,
+                min_periods=3,
+            )
+            .median()
+        )
 
     sigma = 1.4826 * mad
     sigma = sigma.replace(0, np.nan)
@@ -207,16 +265,22 @@ def flag_spikes(
     cols=None,
     window=11,
     n_sigma=5.0,
+    causal: bool = False,
 ):
     cols = cols or SENSOR_COLS
-    df = df.copy()
+    df = df.sort_values(["machine_id", "ts"]).copy()
 
     for c in cols:
         if c not in df.columns:
             continue
 
         df[f"spike_{c}"] = df.groupby("machine_id")[c].transform(
-            lambda s: hampel_flag(s, window, n_sigma)
+            lambda s: hampel_flag(
+                s,
+                window,
+                n_sigma,
+                causal=causal,
+            )
         )
 
     spike_cols = [f"spike_{c}" for c in cols if f"spike_{c}" in df.columns]
@@ -238,6 +302,7 @@ def interpolate_short_gaps(
     df: pd.DataFrame,
     cols=None,
     max_gap: int = 5,
+    causal: bool = False,
 ):
     cols = cols or SENSOR_COLS
     df = df.sort_values(["machine_id", "ts"]).copy()
@@ -249,13 +314,27 @@ def interpolate_short_gaps(
 
         before = df[c].isna().sum()
 
-        df[c] = df.groupby("machine_id")[c].transform(
-            lambda s: s.interpolate(
-                method="linear",
-                limit=max_gap,
-                limit_direction="both",
+        if causal:
+            # 미래 측정값을 이용한 선형 보간은 수행하지 않습니다.
+            #
+            # 설비별 과거의 마지막 정상값으로 채우되,
+            # 연속 결측이 max_gap개를 넘으면 이후 값은
+            # 채우지 않고 NaN으로 유지합니다.
+            #
+            # 여기서 max_gap은 관측치 개수 기준입니다.
+            df[c] = df.groupby("machine_id")[c].transform(
+                lambda s: s.ffill(limit=max_gap)
             )
-        )
+
+        else:
+            # 기존 사후 분석용 양방향 선형 보간
+            df[c] = df.groupby("machine_id")[c].transform(
+                lambda s: s.interpolate(
+                    method="linear",
+                    limit=max_gap,
+                    limit_direction="both",
+                )
+            )
 
         filled[c] = int(before - df[c].isna().sum())
 
@@ -345,6 +424,7 @@ def reindex_time(
 
     for m, g in df.groupby("machine_id"):
         g = g.set_index("ts").sort_index()
+
         full = pd.date_range(
             g.index.min(),
             g.index.max(),
@@ -359,7 +439,10 @@ def reindex_time(
         g2.index.name = "ts"
         parts.append(g2.reset_index())
 
-    return pd.concat(parts, ignore_index=True).sort_values(["ts", "machine_id"])
+    return pd.concat(
+        parts,
+        ignore_index=True,
+    ).sort_values(["ts", "machine_id"])
 
 
 # ----------------------------------------------------------------------
@@ -367,9 +450,15 @@ def reindex_time(
 # ----------------------------------------------------------------------
 
 
-def run_pipeline(raw: pd.DataFrame, verbose: bool = True):
+def run_pipeline(
+    raw: pd.DataFrame,
+    verbose: bool = True,
+    causal: bool = False,
+):
     log = StepLog()
     rep = {}
+
+    rep["causal"] = causal
 
     df = log("0. 원본 수신", raw.copy())
     df = log("1. 타입 강제", coerce_types(df))
@@ -379,22 +468,44 @@ def run_pipeline(raw: pd.DataFrame, verbose: bool = True):
     df, rep["temp_unit"] = detect_and_fix_temp_unit(df)
     df = log("4a. 온도 단위 통일", df)
 
-    df, rep["vib_unit"] = detect_vibration_unit(df)
+    df, rep["vib_unit"] = detect_vibration_unit(
+        df,
+        causal=causal,
+    )
     df = log("4b. 진동 단위 통일", df)
 
     df, rep["range"] = range_check(df)
     df = log("5. 물리범위 → NaN", df)
 
-    df = flag_spikes(df)
+    df = flag_spikes(
+        df,
+        causal=causal,
+    )
     df = log("6. 스파이크 플래그", df)
 
-    df, rep["filled"] = interpolate_short_gaps(df)
+    df, rep["filled"] = interpolate_short_gaps(
+        df,
+        causal=causal,
+    )
     df = log("7. 짧은 결측 보간", df)
 
-    slopes, rep["drift_daily"] = estimate_drift(df)
-    rep["drift_slopes"] = slopes
+    if causal:
+        # 전체 기간의 센서값으로 계산한 드리프트 기울기를
+        # 과거 시점에 적용하면 미래 정보가 섞일 수 있습니다.
+        #
+        # 학습용 정제에서는 보정을 생략합니다.
+        # 추후 학습 구간에서만 보정 기준을 추정하고
+        # 이후 구간에 고정 적용하는 방식으로 확장할 수 있습니다.
+        rep["drift_daily"] = pd.DataFrame()
+        rep["drift_slopes"] = {}
+        rep["drift_applied"] = {}
 
-    df, rep["drift_applied"] = correct_drift(df, slopes)
+    else:
+        slopes, rep["drift_daily"] = estimate_drift(df)
+        rep["drift_slopes"] = slopes
+
+        df, rep["drift_applied"] = correct_drift(df, slopes)
+
     df = log("8. 드리프트 보정", df)
 
     df = reindex_time(df)
@@ -418,7 +529,16 @@ def run_pipeline(raw: pd.DataFrame, verbose: bool = True):
 # 0을 먼저 NaN 처리하고 0.1~60℃ 범위만 섭씨 혼입값으로 판단하도록 수정
 # 나머지 200 미만 값은 NaN 처리하고, 변환 후 물리 범위 검사 유지
 
+# 학습용 정제와 기존 사후 정제를 구분하는 causal 옵션 추가
+# 진동 단위 판정에 설비별 과거 관측값의 중앙값을 사용하도록 개선
+# Hampel 필터가 현재 시점 이후의 센서값을 참조하지 않도록 수정
+# 학습용 결측 처리에 과거값 기반 제한적 전방 채움을 적용
+# 전체 기간 통계를 사용하는 드리프트 보정은 학습용 정제에서 생략
+# 기존 run_pipeline() 기본 실행 방식과 9단계 로그 구조 유지
+
 # 추후 보완 사항
-# 1. 학습·테스트 분할 이전의 전역 전처리로 인한 데이터 누수 방지
+# 1. 학습·검증·테스트 분할 이전의 전역 전처리로 인한 데이터 누수 방지
 # 2. 실시간 탐지를 위한 미래 시점 참조 없는 스파이크 탐지 및 보간
 # 3. 실제 센서 메타데이터를 이용한 단위 판정
+# 4. 긴 수집 공백에서 전방 채움이 실제 경과 시간을 초과하지 않는지 검증
+# 5. 학습 데이터 기준 드리프트 추정 및 이후 데이터 적용 방식 검토
