@@ -15,6 +15,7 @@
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -126,6 +127,12 @@ def main() -> int:
 
     fails = []
 
+    # Windows 기본 인코딩(cp949)에서 출력할 수 없는 문자가 있어도
+    # 자식 Python 프로세스가 오류 없이 출력하도록 UTF-8을 지정합니다.
+    # 부모 프로세스의 환경변수를 직접 변경하지 않고 복사본을 사용합니다.
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+
     for name, cmd, logfile in steps:
         cwd = (
             ROOT / "analysis"
@@ -147,6 +154,7 @@ def main() -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
 
         out = r.stdout + r.stderr
