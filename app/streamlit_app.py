@@ -116,37 +116,51 @@ if raw.empty:
 # ----------------------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(["운영 현황", "데이터 품질", "모델 성능", "방법·한계"])
 
+
 with tab1:
+    # 2024년 초기 실험 데이터와 이후 운영 데이터를 구분합니다.
+    # 초기 실험 CSV는 로컬에만 존재할 수 있으므로
+    # 배포 환경에서도 실제 로드된 데이터에 맞춰 지표를 계산합니다.
+    initial_data = raw[raw["ts"].dt.year == 2024]
+    operating_data = raw[raw["ts"].dt.year != 2024]
+
+    initial_days = initial_data["ts"].dt.normalize().nunique()
+    operating_days = operating_data["ts"].dt.normalize().nunique()
+    total_days = raw["ts"].dt.normalize().nunique()
+
     c = st.columns(4)
     c[0].metric("수집 행수", f"{len(raw):,}")
     c[1].metric("설비 수", raw["machine_id"].nunique())
-    c[2].metric(
-        "데이터 존재 일수",
-        f"{raw['ts'].dt.normalize().nunique():,}일",
-    )
-
-    # 실제 데이터에 포함된 연도를 확인하여 안내 문구 구성
-    years = sorted(raw["ts"].dt.year.dropna().unique())
-
-    if len(years) > 1:
-        data_description = (
-            f"{', '.join(map(str, years))}년 데이터가 포함되어 있으며, "
-            "중간의 미수집 기간은 데이터 존재 일수에 포함하지 않습니다."
-        )
-    else:
-        data_description = (
-            f"{years[0]}년 수집 데이터를 기준으로 계산했으며, "
-            "데이터가 존재하지 않는 날짜는 포함하지 않습니다."
-        )
-
-    st.caption(
-        f"데이터 범위: {raw['ts'].min():%Y-%m-%d} ~ "
-        f"{raw['ts'].max():%Y-%m-%d} | "
-        f"{data_description}"
-    )
+    c[2].metric("운영 데이터 존재 일수", f"{operating_days:,}일")
 
     fr = raw["machine_failure"].mean() * 100 if "machine_failure" in raw else np.nan
     c[3].metric("고장 발생률", f"{fr:.2f}%")
+
+    if not operating_data.empty:
+        st.caption(
+            f"운영 데이터 범위: "
+            f"{operating_data['ts'].min():%Y-%m-%d} ~ "
+            f"{operating_data['ts'].max():%Y-%m-%d} | "
+            f"실제 데이터가 존재하는 날짜 {operating_days:,}일"
+        )
+    else:
+        st.warning("운영 데이터가 없습니다.")
+
+    if not initial_data.empty:
+        st.info(
+            f"2024년 초기 실험 데이터 {initial_days:,}일이 별도로 포함되어 있습니다. "
+            f"전체 데이터 존재 일수는 {total_days:,}일이며, "
+            "상단의 운영 데이터 존재 일수에는 초기 실험 기간을 포함하지 않습니다."
+        )
+    else:
+        st.caption(
+            "2024년 초기 실험 데이터는 현재 환경에 포함되어 있지 않습니다. "
+            "로컬과 배포 환경의 데이터 구성에 따라 전체 행수와 "
+            "분석 그래프는 달라질 수 있습니다."
+        )
+
+    # 기존 센서 추이와 고장 건수 그래프는 전체 로드 데이터를 사용합니다.
+    # 따라서 초기 실험 데이터가 있는 로컬에서는 해당 기간도 조회할 수 있습니다.
 
     st.markdown("#### 설비별 센서 추이")
     mid = st.selectbox("설비", sorted(raw["machine_id"].unique()))
@@ -201,26 +215,70 @@ with tab2:
     st.bar_chart(miss, height=240)
 
     st.markdown("#### 수집 공백 — 통신이 끊긴 구간")
+
+    # 설비별로 연속된 수집 시각의 간격을 계산합니다.
     g = raw.sort_values(["machine_id", "ts"]).copy()
     g["gap_min"] = g.groupby("machine_id")["ts"].diff().dt.total_seconds() / 60
 
-    gaps = g[g["gap_min"] > 2][["machine_id", "ts", "gap_min"]]
+    # 정상 수집 주기는 1분입니다.
+    # 2분 초과~24시간 이하의 공백만 수집 중 공백으로 집계합니다.
+    # 24시간 초과 구간은 장기 수집 단절로 별도 표시합니다.
+    GAP_THRESHOLD_MIN = 2
+    LONG_BREAK_MIN = 24 * 60
+
+    gaps = g[(g["gap_min"] > GAP_THRESHOLD_MIN) & (g["gap_min"] <= LONG_BREAK_MIN)][
+        ["machine_id", "ts", "gap_min"]
+    ].copy()
+
+    long_breaks = g[g["gap_min"] > LONG_BREAK_MIN][
+        ["machine_id", "ts", "gap_min"]
+    ].copy()
+
+    # 실제 관측 간격에서 정상적인 1분을 제외합니다.
+    gaps["missing_min"] = gaps["gap_min"] - 1
 
     cc = st.columns(3)
-    cc[0].metric("2분 넘는 공백", f"{len(gaps):,}회")
+    cc[0].metric("2분 초과 수집 공백", f"{len(gaps):,}회")
     cc[1].metric(
-        "최장 공백",
-        f"{gaps['gap_min'].max():.0f}분" if len(gaps) else "-",
+        "최장 수집 공백",
+        f"{gaps['gap_min'].max():,.0f}분" if len(gaps) else "-",
     )
     cc[2].metric(
         "총 결손 시간",
-        f"{gaps['gap_min'].sum() / 60:.1f}시간" if len(gaps) else "-",
+        f"{gaps['missing_min'].sum() / 60:,.1f}시간" if len(gaps) else "0.0시간",
+    )
+
+    st.caption(
+        "설비별 기록 간격이 2분 초과~24시간 이하인 구간을 "
+        "수집 중 공백으로 분류합니다. "
+        "총 결손 시간은 정상 수집 간격 1분을 제외한 값입니다. "
+        "24시간은 통계 분류를 위한 임시 기준이며, "
+        "이 기준만으로 실제 통신 장애 여부를 확정하지 않습니다."
     )
 
     st.dataframe(
         gaps.sort_values("gap_min", ascending=False).head(15),
+        hide_index=True,
         height=260,
     )
+
+    st.markdown("#### 장기 수집 단절 — 24시간 초과")
+
+    cc = st.columns(2)
+    cc[0].metric("장기 단절 구간", f"{len(long_breaks):,}회")
+    cc[1].metric(
+        "최장 장기 단절",
+        f"{long_breaks['gap_min'].max() / 1440:,.1f}일" if len(long_breaks) else "-",
+    )
+
+    if not long_breaks.empty:
+        st.dataframe(
+            long_breaks.sort_values("gap_min", ascending=False).head(15),
+            hide_index=True,
+            height=220,
+        )
+    else:
+        st.info("24시간을 초과하는 장기 수집 단절은 없습니다.")
 
     st.markdown("#### 단위 혼재 흔적")
     if "air_temp_k" in raw:
@@ -596,11 +654,23 @@ st.caption("소스: https://github.com/Kangmunju/predictive-maintenance")
 # 4. 데이터 수집 기간 계산 개선
 #    - 문제: 최초~최종 날짜 차이로 계산하여 미수집 기간까지 포함
 #    - 원인: 2024년 초기 시뮬레이션과 2026년 자동 수집 데이터가 혼재
-#    - 해결: ts.dt.normalize().nunique()로 실제 데이터 존재 날짜만 집계
-#    - 결과: 기존 1,014일 → 실제 데이터 존재 일수 49일로 수정
-#    - 최초·최종 날짜를 별도 표시하여 전체 데이터 범위와 수집 일수 구분
-#    - 로컬과 배포 환경의 데이터 구성이 달라도 동일한 연도 설명이 표시됨
-#    - 해결: 실제 로드된 데이터의 연도를 확인하여 환경에 맞는 안내 문구를 동적으로 생성
+#    - 기존 해결: ts.dt.normalize().nunique()로 실제 데이터 존재 날짜만 집계
+#    - 과거 결과: 기존 1,014일 → 실제 데이터 존재 일수 49일로 수정
+#    - 이후 자동수집으로 로컬 데이터 존재 일수가 50일, 51일로 증가
+#    - 추가 문제: 로컬에는 2024년 실험 CSV 14개가 있지만 배포에는 없음
+#    - 현재 개선: 2024년 초기 실험 데이터와 이후 운영 데이터를 분리하여 집계
+#    - 운영 데이터 존재 일수는 초기 실험 기간을 제외하여 표시
+#    - 실제 로드된 데이터에 따라 로컬과 배포 환경의 안내 문구를 동적으로 생성
+#    - 기존 센서 추이와 고장 건수 그래프는 전체 로드 데이터를 계속 사용
+
+# 4-1. 수집 공백 통계 개선
+#    - 문제: 2024년 초기 실험과 2026년 자동수집 사이의 긴 기간을 통신 장애로 집계
+#    - 원인: 설비별 연속 기록의 시간 차이를 모두 동일한 수집 공백으로 처리
+#    - 해결: 2분 초과~24시간 이하의 공백과 24시간 초과 장기 단절을 분리
+#    - 총 결손 시간은 각 공백에서 정상적인 1분 수집 간격을 제외하여 계산
+#    - 24시간 기준은 통계 분류를 위한 임시 기준이며 실제 장애 판정 기준은 아님
+#    - 기존 수집 데이터와 모델 학습 로직은 변경하지 않음
+#
 
 # 5. 호환성 및 검증
 #    - metrics.json에 에피소드 평가 결과가 없는 경우 경고를 표시하고 기존 기능 유지
