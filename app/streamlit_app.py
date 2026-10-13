@@ -718,8 +718,6 @@ CNC 밀링 설비 3대의 1분 단위 센서 데이터를 수집·정제하고,
 """
     )
 
-    if met:
-        st.json(met)
 
 st.caption("소스: https://github.com/Kangmunju/predictive-maintenance")
 
