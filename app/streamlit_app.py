@@ -281,22 +281,117 @@ with tab2:
         st.info("24시간을 초과하는 장기 수집 단절은 없습니다.")
 
     st.markdown("#### 단위 혼재 흔적")
-    if "air_temp_k" in raw:
-        n_c = int((raw["air_temp_k"] < 200).sum())
-        st.write(
-            f"공기온도가 200 K 미만인 행: **{n_c:,}건** "
-            f"({n_c / len(raw) * 100:.2f}%) "
-            "→ 섭씨로 들어온 구간입니다."
-        )
 
-        st.bar_chart(
-            pd.cut(raw["air_temp_k"].dropna(), bins=40)
-            .value_counts()
-            .sort_index()
-            .rename("건수")
-            .reset_index(drop=True),
-            height=200,
-        )
+    if "air_temp_k" in raw:
+        # 공기온도는 켈빈(K) 단위로 저장되어야 합니다.
+        # 온도 범위를 기준으로 단위 혼재 의심값과 고온 이상치를 구분합니다.
+        temp = pd.to_numeric(raw["air_temp_k"], errors="coerce").dropna()
+
+        if not temp.empty:
+            # 200 K 미만: 섭씨 값이 켈빈으로 변환되지 않았을 가능성
+            # 200~350 K: 일반적인 공기온도 범위
+            # 350 K 초과: 고온 이상치 또는 센서 오류 가능성
+            n_low = int((temp < 200).sum())
+            n_normal = int(((temp >= 200) & (temp <= 350)).sum())
+            n_high = int((temp > 350).sum())
+            total = len(temp)
+
+            st.write(
+                f"공기온도가 200 K 미만인 행: **{n_low:,}건** "
+                f"({n_low / total * 100:.2f}%, 공기온도 유효값 기준) "
+                "→ 섭씨 값이 켈빈으로 변환되지 않고 입력된 것으로 "
+                "의심되는 구간입니다."
+            )
+
+            st.markdown("##### 온도 구간별 데이터 분포")
+
+            summary = pd.DataFrame(
+                {
+                    "온도 구간": [
+                        "200 K 미만",
+                        "200~350 K",
+                        "350 K 초과",
+                    ],
+                    "건수": [n_low, n_normal, n_high],
+                }
+            ).set_index("온도 구간")
+
+            st.bar_chart(summary, height=260)
+
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "구간": [
+                            "200 K 미만",
+                            "200~350 K",
+                            "350 K 초과",
+                        ],
+                        "건수": [n_low, n_normal, n_high],
+                        "비율(%)": [
+                            round(n_low / total * 100, 2),
+                            round(n_normal / total * 100, 2),
+                            round(n_high / total * 100, 2),
+                        ],
+                    }
+                ),
+                hide_index=True,
+            )
+
+            st.caption(
+                "구간별 비율은 공기온도 유효값을 기준으로 계산합니다. "
+                "200 K와 350 K는 분포를 구분하기 위한 분석 기준이며, "
+                "온도값만으로 실제 입력 단위나 센서 오류 여부를 확정할 수 없습니다."
+            )
+
+            st.markdown("##### 온도 상세 분포")
+
+            # 극단적인 이상치 때문에 히스토그램이 왜곡되지 않도록
+            # 200 K 미만과 200~350 K 구간을 각각 별도로 표시합니다.
+            low_temp = temp[temp < 200]
+            normal_temp = temp[(temp >= 200) & (temp <= 350)]
+
+            if not low_temp.empty:
+                st.markdown("**200 K 미만 — 단위 혼재 의심 구간**")
+
+                low_counts, low_edges = np.histogram(low_temp, bins=20)
+
+                low_distribution = pd.DataFrame(
+                    {
+                        "온도 구간 (K)": [
+                            f"{low_edges[i]:.0f}~{low_edges[i + 1]:.0f}"
+                            for i in range(len(low_counts))
+                        ],
+                        "건수": low_counts,
+                    }
+                ).set_index("온도 구간 (K)")
+
+                st.bar_chart(low_distribution, height=240)
+
+            if not normal_temp.empty:
+                st.markdown("**200~350 K — 일반 관측 구간**")
+
+                normal_counts, normal_edges = np.histogram(normal_temp, bins=20)
+
+                normal_distribution = pd.DataFrame(
+                    {
+                        "온도 구간 (K)": [
+                            f"{normal_edges[i]:.0f}~{normal_edges[i + 1]:.0f}"
+                            for i in range(len(normal_counts))
+                        ],
+                        "건수": normal_counts,
+                    }
+                ).set_index("온도 구간 (K)")
+
+                st.bar_chart(normal_distribution, height=240)
+
+            if n_high:
+                st.info(
+                    f"350 K 초과 관측값 {n_high:,}건은 상세 분포에서 제외했지만, "
+                    "상단 구간별 집계에는 포함되어 있습니다. "
+                    "원본 데이터는 삭제하거나 수정하지 않았습니다."
+                )
+        else:
+            st.info("공기온도 분포를 표시할 유효한 데이터가 없습니다.")
 
 
 with tab3:
@@ -670,6 +765,18 @@ st.caption("소스: https://github.com/Kangmunju/predictive-maintenance")
 #    - 총 결손 시간은 각 공백에서 정상적인 1분 수집 간격을 제외하여 계산
 #    - 24시간 기준은 통계 분류를 위한 임시 기준이며 실제 장애 판정 기준은 아님
 #    - 기존 수집 데이터와 모델 학습 로직은 변경하지 않음
+
+# 4-2. 단위 혼재 그래프 개선
+#    - 최초 문제: 온도 분포 그래프의 X축이 0~39의 단순 번호로 표시됨
+#    - 원인: pd.cut() 결과에 reset_index(drop=True)를 적용해 온도 구간 정보 삭제
+#    - 1차 개선: np.histogram()으로 실제 켈빈 범위를 X축에 표시
+#    - 추가 문제: 10,000 K 이상의 극단적인 이상치 때문에 구간 폭이 커지고
+#      대부분의 관측값이 일부 막대에 집중되어 분포를 해석하기 어려움
+#    - 최종 개선: 200 K 미만 / 200~350 K / 350 K 초과의 세 구간으로 요약
+#    - 200 K 미만과 200~350 K 구간의 상세 히스토그램을 각각 표시
+#    - 350 K 초과 이상치는 요약 집계에 포함하고 상세 분포에서만 제외
+#    - 온도 구간 기준은 분석용이며 실제 입력 단위나 센서 오류를 확정하지 않음
+#    - 기존 데이터와 모델 학습 로직은 변경하지 않음
 #
 
 # 5. 호환성 및 검증
